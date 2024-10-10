@@ -9,16 +9,16 @@ import scipy.sparse as sp
 import torch
 from torch import optim
 
-from gae.model import GCNModelVAE
-from gae.optimizer import loss_function
-from gae.utils import load_data, mask_test_edges, preprocess_graph, get_roc_score
+from model import GCNModelAE, GCNModelVAE
+from optimizer import loss_ae, loss_vae
+from utils import load_data, mask_test_edges, preprocess_graph, get_roc_score
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='gcn_vae', help="models used")
+parser.add_argument('--model', type=str, default='gcn_ae', help="models used")
 parser.add_argument('--seed', type=int, default=42, help='Random seed.')
 parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train.')
-parser.add_argument('--hidden1', type=int, default=32, help='Number of units in hidden layer 1.')
-parser.add_argument('--hidden2', type=int, default=16, help='Number of units in hidden layer 2.')
+parser.add_argument('--hidden_dim', type=int, default=32, help='Number of units in hidden layer 1.')
+parser.add_argument('--z_dim', type=int, default=16, help='Number of units in hidden layer 2.')
 parser.add_argument('--lr', type=float, default=0.01, help='Initial learning rate.')
 parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
 parser.add_argument('--dataset-str', type=str, default='cora', help='type of dataset.')
@@ -45,10 +45,13 @@ def gae_for(args):
     # adj_label = sparse_to_tuple(adj_label)
     adj_label = torch.FloatTensor(adj_label.toarray())
 
-    pos_weight = float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()
+    pos_weight = torch.FloatTensor([adj.shape[0] * adj.shape[0] - adj.sum()]) / adj.sum()
     norm = adj.shape[0] * adj.shape[0] / float((adj.shape[0] * adj.shape[0] - adj.sum()) * 2)
 
-    model = GCNModelVAE(feat_dim, args.hidden1, args.hidden2, args.dropout)
+    if args.model == "gcn_ae":
+        model = GCNModelAE(feat_dim, args.hidden_dim, args.z_dim, args.dropout)
+    elif args.model == "gcn_vae":
+        model = GCNModelVAE(feat_dim, args.hidden_dim, args.z_dim, args.dropout)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     hidden_emb = None
@@ -56,15 +59,19 @@ def gae_for(args):
         t = time.time()
         model.train()
         optimizer.zero_grad()
-        recovered, mu, logvar = model(features, adj_norm)
-        loss = loss_function(preds=recovered, labels=adj_label,
-                             mu=mu, logvar=logvar, n_nodes=n_nodes,
-                             norm=norm, pos_weight=pos_weight)
+        if args.model == "gcn_ae":
+            recovered, z_mean = model(features, adj_norm)
+            loss = loss_ae(preds=recovered, labels=adj_label, norm=norm, pos_weight=pos_weight)
+        elif args.model == "gcn_vae":
+            recovered, z_mean, z_log_std = model(features, adj_norm)
+            loss = loss_vae(preds=recovered, labels=adj_label,
+                                z_mean=z_mean, z_log_std=z_log_std, n_nodes=n_nodes,
+                                norm=norm, pos_weight=pos_weight)
         loss.backward()
         cur_loss = loss.item()
         optimizer.step()
 
-        hidden_emb = mu.data.numpy()
+        hidden_emb = z_mean.data.numpy()
         roc_curr, ap_curr = get_roc_score(hidden_emb, adj_orig, val_edges, val_edges_false)
 
         print("Epoch:", '%04d' % (epoch + 1), "train_loss=", "{:.5f}".format(cur_loss),
